@@ -39,7 +39,6 @@ pipeline {
           sh '''
             echo "$AZ_PASSWORD" | docker login ${ACR_LOGIN} -u $AZ_APPID --password-stdin
             docker push ${IMAGE_NAME}:${IMAGE_TAG}
-            docker logout ${ACR_LOGIN}
           '''
         }
       }
