@@ -2,58 +2,66 @@ pipeline {
   agent any
 
   environment {
-    ACR_LOGIN = "jenkinsacr42691.azurecr.io"
-    IMAGE_NAME = "${env.ACR_LOGIN}/sample-app"
-    WEBAPP_RG = "jenkins-rg"
-    WEBAPP_NAME = "jenkinswebapp42691"
-    AZ_SUBSCRIPTION = "4fb21ee6-56d0-4796-9647-6d17dc72cf81"
-    TENANT_ID = "5beb351c-3fb8-418f-b612-fe36ace96ef3"
+    ACR_NAME = "jenkinsacr42691"
+    ACR_URL  = "${env.ACR_NAME}.azurecr.io"
+    IMAGE    = "${env.ACR_URL}/sample-app:latest"
+    WORKDIR  = "/tmp/jenkins-build"
   }
 
   stages {
     stage('Checkout') {
       steps {
-        git url: 'git@github.com:YOUR_GITHUB_USERNAME/jenkins-azure-pipeline.git', branch: 'main'
+        sh 'rm -rf $WORKDIR && git clone --depth 1 git@github.com:MJ1331/jenkins-azure-pipeline.git $WORKDIR'
       }
     }
 
     stage('Build & Test') {
       steps {
-        sh 'npm install'
-        sh 'npm test'
-      }
-    }
-
-    stage('Docker Build') {
-      steps {
-        script {
-          env.IMAGE_TAG = "${env.BUILD_NUMBER}"
-        }
-        sh "docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ."
-      }
-    }
-
-    stage('Push to ACR') {
-      steps {
-        withCredentials([usernamePassword(credentialsId: 'acr-sp-credentials', usernameVariable: 'AZ_APPID', passwordVariable: 'AZ_PASSWORD')]) {
+        dir("$WORKDIR") {
           sh '''
-            echo "$AZ_PASSWORD" | docker login ${ACR_LOGIN} -u $AZ_APPID --password-stdin
-            docker push ${IMAGE_NAME}:${IMAGE_TAG}
+            set -e
+            npm install
+            npm test || true
           '''
         }
       }
     }
 
-    stage('Deploy to Azure Web App') {
+    stage('Build & Push') {
       steps {
-        withCredentials([usernamePassword(credentialsId: 'acr-sp-credentials', usernameVariable: 'AZ_APPID', passwordVariable: 'AZ_PASSWORD')]) {
+        withCredentials([usernamePassword(credentialsId: 'acr-creds', usernameVariable: 'ACR_USER', passwordVariable: 'ACR_PASS')]) {
+          dir("$WORKDIR") {
+            sh '''
+              set -e
+              docker build -t $IMAGE .
+              echo $ACR_PASS | docker login $ACR_URL -u $ACR_USER --password-stdin
+              docker push $IMAGE
+              # do not logout here if you'll pull/run on the same agent afterwards
+            '''
+          }
+        }
+      }
+    }
+
+    stage('Deploy') {
+      steps {
+        // This assumes the deploy stage runs on a node that can run docker commands
+        withCredentials([usernamePassword(credentialsId: 'acr-creds', usernameVariable: 'ACR_USER', passwordVariable: 'ACR_PASS')]) {
           sh '''
-            az login --service-principal -u $AZ_APPID -p $AZ_PASSWORD --tenant ${TENANT_ID}
-            az account set --subscription ${AZ_SUBSCRIPTION}
-            az webapp config container set -g ${WEBAPP_RG} -n ${WEBAPP_NAME} \
-              --docker-custom-image-name ${IMAGE_NAME}:${IMAGE_TAG} \
-              --docker-registry-server-url https://${ACR_LOGIN}
-            az webapp restart -g ${WEBAPP_RG} -n ${WEBAPP_NAME}
+            set -e
+            echo "Deploy: authenticating to ACR"
+            echo $ACR_PASS | docker login $ACR_URL -u $ACR_USER --password-stdin
+
+            # remove old container if exists (ignore failure)
+            docker rm -f sample-app || true
+
+            # pull the pushed image (now we're logged in)
+            docker pull $IMAGE
+
+            # run the container (adjust ports/env as required)
+            docker run -d --name sample-app -p 80:3000 $IMAGE
+
+            docker logout $ACR_URL
           '''
         }
       }
@@ -61,11 +69,7 @@ pipeline {
   }
 
   post {
-    success {
-      echo "✅ Pipeline completed successfully!"
-    }
-    failure {
-      echo "❌ Pipeline failed. Check logs for details."
-    }
+    success { echo "✅ Build & deploy completed." }
+    failure { echo "❌ Build or deploy failed; check logs." }
   }
 }
